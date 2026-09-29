@@ -3,6 +3,8 @@ use std::{
     sync::{mpsc::Sender, Arc, Mutex},
 };
 
+#[cfg(target_os = "macos")]
+use hyper_headset::devices::ChargingStatus;
 use hyper_headset::devices::{format_int_value, DeviceEvent, DeviceProperties, PropertyType};
 #[cfg(target_os = "windows")]
 use image::{Rgba, RgbaImage};
@@ -23,6 +25,7 @@ use winreg::{
 use crate::tray_battery_icon_state::{TrayBatteryIconState, WindowsIconKey};
 
 const NO_COMPATIBLE_DEVICE: &str = "No compatible device found. Is the dongle plugged in?";
+#[cfg_attr(target_os = "macos", allow(dead_code))]
 const HEADSET_NOT_CONNECTED: &str = "Headset is not connected";
 #[cfg(target_os = "windows")]
 const RUN_KEY_PATH: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
@@ -33,6 +36,212 @@ const STARTUP_APPROVED_RUN_KEY_PATH: &str =
 const STARTUP_VALUE_NAME: &str = "HyperHeadset";
 #[cfg(target_os = "windows")]
 const WINDOWS_ICON_SIZE: u32 = 16;
+
+#[cfg(target_os = "macos")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum MacIconKind {
+    Unavailable,
+    Level { quarters: u8, charging: bool },
+}
+
+#[cfg(target_os = "macos")]
+fn mac_icon_kind(device_properties: Option<&DeviceProperties>) -> MacIconKind {
+    let Some(props) = device_properties else {
+        return MacIconKind::Unavailable;
+    };
+    if !props.connected.unwrap_or(false) {
+        return MacIconKind::Unavailable;
+    }
+    let charging = matches!(
+        props.charging,
+        Some(ChargingStatus::Charging | ChargingStatus::FullyCharged)
+    );
+    let quarters = match props.battery_level {
+        Some(0..=9) => 0,
+        Some(10..=34) => 1,
+        Some(35..=59) => 2,
+        Some(60..=84) => 3,
+        Some(85..=100) => 4,
+        Some(_) => 4,
+        None => 0,
+    };
+    MacIconKind::Level { quarters, charging }
+}
+
+#[cfg(target_os = "macos")]
+fn macos_menu_title(device_properties: Option<&DeviceProperties>) -> String {
+    let Some(props) = device_properties else {
+        return "—".to_string();
+    };
+    if !props.connected.unwrap_or(false) {
+        return "—".to_string();
+    }
+    match (props.battery_level, props.charging) {
+        (Some(level), Some(ChargingStatus::Charging | ChargingStatus::FullyCharged)) => {
+            format!("{level}% ⚡")
+        }
+        (Some(level), _) => format!("{level}%"),
+        (None, Some(ChargingStatus::Charging | ChargingStatus::FullyCharged)) => "⚡".to_string(),
+        _ => "…".to_string(),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn charging_label(status: Option<ChargingStatus>) -> &'static str {
+    match status {
+        Some(ChargingStatus::Charging) => "Yes",
+        Some(ChargingStatus::FullyCharged) => "Full",
+        Some(ChargingStatus::NotCharging) => "No",
+        Some(ChargingStatus::ChargeError) => "Error",
+        None => "Unknown",
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn connected_label(connected: Option<bool>) -> &'static str {
+    match connected {
+        Some(true) => "Yes",
+        Some(false) => "No",
+        None => "Unknown",
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn device_title(props: &DeviceProperties) -> String {
+    props
+        .device_name
+        .clone()
+        .unwrap_or_else(|| "HyperX headset".to_string())
+}
+
+#[cfg(target_os = "macos")]
+fn append_macos_status(menu: &Menu, props: &DeviceProperties) {
+    let battery = props
+        .battery_level
+        .map(|level| format!("{level}%"))
+        .unwrap_or_else(|| "Unknown".to_string());
+    // Enabled so macOS draws them at full contrast. No callback is registered,
+    // so choosing one closes the menu and does nothing else.
+    let _ = menu.append(&MenuItem::new(device_title(props), true, None));
+    let _ = menu.append(&MenuItem::new(format!("Battery: {battery}"), true, None));
+    let _ = menu.append(&MenuItem::new(
+        format!("Charging: {}", charging_label(props.charging)),
+        true,
+        None,
+    ));
+    let _ = menu.append(&MenuItem::new(
+        format!("Connected: {}", connected_label(props.connected)),
+        true,
+        None,
+    ));
+}
+
+/// Template menu-bar icon. Opaque black pixels are tinted by macOS for light and dark mode.
+#[cfg(target_os = "macos")]
+fn macos_status_icon(kind: MacIconKind) -> tray_icon::Icon {
+    let charging = matches!(kind, MacIconKind::Level { charging: true, .. });
+    let width: i32 = if charging { 40 } else { 28 };
+    let height: i32 = 36;
+    let mut rgba = vec![0u8; (width * height * 4) as usize];
+
+    fn paint(rgba: &mut [u8], width: i32, height: i32, x: i32, y: i32, alpha: u8) {
+        if x < 0 || y < 0 || x >= width || y >= height {
+            return;
+        }
+        let i = ((y * width + x) * 4) as usize;
+        rgba[i] = 0;
+        rgba[i + 1] = 0;
+        rgba[i + 2] = 0;
+        rgba[i + 3] = alpha;
+    }
+    fn fill(
+        rgba: &mut [u8],
+        width: i32,
+        height: i32,
+        x0: i32,
+        y0: i32,
+        x1: i32,
+        y1: i32,
+        alpha: u8,
+    ) {
+        for y in y0..=y1 {
+            for x in x0..=x1 {
+                paint(rgba, width, height, x, y, alpha);
+            }
+        }
+    }
+
+    // Battery cap and body.
+    fill(&mut rgba, width, height, 9, 2, 16, 5, 255);
+    fill(&mut rgba, width, height, 4, 5, 21, 33, 255);
+    fill(&mut rgba, width, height, 7, 8, 18, 30, 0);
+
+    if let MacIconKind::Level { quarters, .. } = kind {
+        let inner_top = 8;
+        let inner_bottom = 30;
+        let inner_h = inner_bottom - inner_top;
+        let fill_h = quarters as i32 * inner_h / 4;
+        if fill_h > 0 {
+            fill(
+                &mut rgba,
+                width,
+                height,
+                7,
+                inner_bottom - fill_h,
+                18,
+                inner_bottom - 1,
+                255,
+            );
+        }
+    } else {
+        for y in 10..=28 {
+            let x = 8 + (y - 10) * 10 / 18;
+            paint(&mut rgba, width, height, x, y, 255);
+            paint(&mut rgba, width, height, x + 1, y, 255);
+        }
+    }
+
+    if charging {
+        // Bolt to the right of the battery.
+        let bolt: &[(i32, i32)] = &[
+            (27, 12),
+            (28, 12),
+            (26, 13),
+            (27, 13),
+            (25, 14),
+            (26, 14),
+            (27, 14),
+            (28, 14),
+            (29, 14),
+            (27, 15),
+            (28, 15),
+            (29, 15),
+            (30, 15),
+            (28, 16),
+            (29, 16),
+            (30, 16),
+            (29, 17),
+            (30, 17),
+            (28, 18),
+            (29, 18),
+            (27, 19),
+            (28, 19),
+            (26, 20),
+            (27, 20),
+            (28, 20),
+            (29, 20),
+            (26, 21),
+            (27, 21),
+            (25, 22),
+            (26, 22),
+        ];
+        for &(x, y) in bolt {
+            paint(&mut rgba, width, height, x, y, 255);
+        }
+    }
+
+    tray_icon::Icon::from_rgba(rgba, width as u32, height as u32).expect("menu bar icon")
+}
 
 #[cfg(target_os = "windows")]
 fn create_default_tray_icon() -> tray_icon::Icon {
@@ -204,11 +413,18 @@ pub struct TrayApp {
     icon_cache: HashMap<WindowsIconKey, Vec<u8>>,
     #[cfg(target_os = "windows")]
     current_icon_key: Option<WindowsIconKey>,
+    #[cfg(target_os = "macos")]
+    macos_icon_cache: HashMap<MacIconKind, tray_icon::Icon>,
+    #[cfg(target_os = "macos")]
+    macos_icon_kind: Option<MacIconKind>,
 }
 
 impl ApplicationHandler<Option<DeviceProperties>> for TrayApp {
     fn new_events(&mut self, _event_loop: &winit::event_loop::ActiveEventLoop, cause: StartCause) {
         if cause == StartCause::Init {
+            #[cfg(target_os = "macos")]
+            crate::ignore_terminal_hangup();
+
             #[cfg(target_os = "windows")]
             unsafe {
                 enable_dark_context_menus();
@@ -231,8 +447,10 @@ impl ApplicationHandler<Option<DeviceProperties>> for TrayApp {
                 self.tray_icon = Some(
                     TrayIconBuilder::new()
                         .with_menu(Box::new(Menu::new()))
-                        .with_title("🎧")
-                        .with_tooltip(NO_COMPATIBLE_DEVICE)
+                        .with_icon(macos_status_icon(MacIconKind::Unavailable))
+                        .with_icon_as_template(true)
+                        .with_title("—")
+                        .with_tooltip("HyperX headset — Disconnected")
                         .with_menu_on_left_click(true)
                         .build()
                         .unwrap(),
@@ -294,7 +512,29 @@ impl TrayApp {
             icon_cache: HashMap::new(),
             #[cfg(target_os = "windows")]
             current_icon_key: None,
+            #[cfg(target_os = "macos")]
+            macos_icon_cache: HashMap::new(),
+            #[cfg(target_os = "macos")]
+            macos_icon_kind: None,
         }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn update_macos_icon(&mut self, device_properties: Option<&DeviceProperties>) {
+        let Some(tray) = self.tray_icon.as_ref() else {
+            return;
+        };
+        let kind = mac_icon_kind(device_properties);
+        if self.macos_icon_kind == Some(kind) {
+            return;
+        }
+        let icon = self
+            .macos_icon_cache
+            .entry(kind)
+            .or_insert_with(|| macos_status_icon(kind))
+            .clone();
+        let _ = tray.set_icon_with_as_template(Some(icon), true);
+        self.macos_icon_kind = Some(kind);
     }
 
     #[cfg(target_os = "windows")]
@@ -359,6 +599,8 @@ impl TrayApp {
 
         #[cfg(target_os = "windows")]
         self.update_windows_icon(device_properties.as_ref());
+        #[cfg(target_os = "macos")]
+        self.update_macos_icon(device_properties.as_ref());
 
         let Some(tray) = &mut self.tray_icon else {
             return;
@@ -371,15 +613,34 @@ impl TrayApp {
         let mut new_callbacks: HashMap<MenuId, Box<dyn Fn() + Send + Sync>> = HashMap::new();
 
         let Some(device_properties) = device_properties else {
+            let _ = tray.set_tooltip(Some(
+                "HyperX headset — Disconnected\nIs the USB receiver plugged in?".to_string(),
+            ));
+            #[cfg(target_os = "macos")]
+            tray.set_title(Some(&macos_menu_title(None)));
+            #[cfg(not(target_os = "macos"))]
             let _ = tray.set_tooltip(Some(format!(
                 "HyperHeadset v{}\n{}",
                 env!("CARGO_PKG_VERSION"),
                 NO_COMPATIBLE_DEVICE
             )));
-            #[cfg(target_os = "macos")]
-            tray.set_title(Some(&format!("🎧?")));
-            let status_item = MenuItem::new(NO_COMPATIBLE_DEVICE, false, None);
+            let status_item = MenuItem::new(
+                if cfg!(target_os = "macos") {
+                    "HyperX headset — Disconnected"
+                } else {
+                    NO_COMPATIBLE_DEVICE
+                },
+                cfg!(target_os = "macos"),
+                None,
+            );
             menu.append(&status_item).unwrap();
+            #[cfg(target_os = "macos")]
+            menu.append(&MenuItem::new(
+                "Is the USB receiver plugged in?",
+                true,
+                None,
+            ))
+            .unwrap();
             menu.append(&PredefinedMenuItem::separator()).unwrap();
 
             #[cfg(target_os = "windows")]
@@ -406,15 +667,23 @@ impl TrayApp {
         };
 
         if !device_properties.connected.unwrap_or(false) {
-            let _ = tray.set_tooltip(Some(format!(
-                "HyperHeadset v{}\n{}",
-                env!("CARGO_PKG_VERSION"),
-                HEADSET_NOT_CONNECTED
-            )));
             #[cfg(target_os = "macos")]
-            tray.set_title(Some(&format!("🎧?")));
-            let status_item = MenuItem::new(HEADSET_NOT_CONNECTED, false, None);
-            menu.append(&status_item).unwrap();
+            {
+                let label = format!("{} — Disconnected", device_title(&device_properties));
+                let _ = tray.set_tooltip(Some(label.clone()));
+                tray.set_title(Some(&macos_menu_title(Some(&device_properties))));
+                menu.append(&MenuItem::new(&label, true, None)).unwrap();
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                let _ = tray.set_tooltip(Some(format!(
+                    "HyperHeadset v{}\n{}",
+                    env!("CARGO_PKG_VERSION"),
+                    HEADSET_NOT_CONNECTED
+                )));
+                menu.append(&MenuItem::new(HEADSET_NOT_CONNECTED, false, None))
+                    .unwrap();
+            }
             menu.append(&PredefinedMenuItem::separator()).unwrap();
 
             #[cfg(target_os = "windows")]
@@ -441,14 +710,21 @@ impl TrayApp {
         }
 
         #[cfg(target_os = "macos")]
-        let _ = tray.set_tooltip(Some(
-            device_properties
-                .to_string_with_padding(0)
-                .lines()
-                .filter(|l| !l.contains("Unknown"))
-                .collect::<Vec<&str>>()
-                .join("\n"),
-        ));
+        {
+            let battery = device_properties
+                .battery_level
+                .map(|level| format!("{level}%"))
+                .unwrap_or_else(|| "Unknown".to_string());
+            let _ = tray.set_tooltip(Some(format!(
+                "{}\nBattery: {}\nCharging: {}\nConnected: {}",
+                device_title(&device_properties),
+                battery,
+                charging_label(device_properties.charging),
+                connected_label(device_properties.connected),
+            )));
+            tray.set_title(Some(&macos_menu_title(Some(&device_properties))));
+            append_macos_status(&menu, &device_properties);
+        }
 
         #[cfg(target_os = "windows")]
         let _ = tray.set_tooltip(Some(
@@ -461,12 +737,32 @@ impl TrayApp {
                 .join("\n"),
         ));
 
-        #[cfg(target_os = "macos")]
-        if let Some(battery_level) = device_properties.battery_level {
-            tray.set_title(Some(&format!("🎧 {battery_level}%")));
-        }
-
         for property in device_properties.get_properties() {
+            #[cfg(target_os = "macos")]
+            {
+                let property_name = match &property {
+                    hyper_headset::devices::PropertyDescriptorWrapper::Int(property, _) => {
+                        property.name
+                    }
+                    hyper_headset::devices::PropertyDescriptorWrapper::Bool(property) => {
+                        property.name
+                    }
+                    hyper_headset::devices::PropertyDescriptorWrapper::String(property) => {
+                        property.name
+                    }
+                    #[cfg(feature = "eq-support")]
+                    hyper_headset::devices::PropertyDescriptorWrapper::SelectEQ {
+                        descriptor,
+                        ..
+                    } => descriptor.name,
+                };
+                if matches!(
+                    property_name,
+                    "charging_status" | "battery_level" | "connected"
+                ) {
+                    continue;
+                }
+            }
             match property {
                 hyper_headset::devices::PropertyDescriptorWrapper::Int(property, []) => {
                     let Some(current_value) = property.data else {

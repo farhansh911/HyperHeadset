@@ -24,6 +24,17 @@ fn warn_eq_unavailable_once(can_set_equalizer: bool) {
     }
 }
 
+/// A menu-bar app must outlive the Terminal window that started the raw binary.
+#[cfg(target_os = "macos")]
+fn ignore_terminal_hangup() {
+    unsafe {
+        let mut action: libc::sigaction = std::mem::zeroed();
+        action.sa_sigaction = libc::SIG_IGN;
+        libc::sigemptyset(&mut action.sa_mask);
+        libc::sigaction(libc::SIGHUP, &action, std::ptr::null_mut());
+    }
+}
+
 #[cfg(not(target_os = "linux"))]
 fn main() {
     use clap::ArgAction;
@@ -35,7 +46,24 @@ fn main() {
 
     use crate::status_tray_not_linux::TrayApp;
 
+    // Closing Terminal delivers SIGHUP to the foreground process group.
+    #[cfg(target_os = "macos")]
+    ignore_terminal_hangup();
+
     // The user event is the device state; `None` means no compatible device.
+    // A regular, already-active app gets Quit in the Dock menu immediately.
+    // Accessory apps only show that item after you click the Dock icon once.
+    #[cfg(target_os = "macos")]
+    let event_loop: EventLoop<Option<DeviceProperties>> = {
+        use winit::platform::macos::{ActivationPolicy, EventLoopBuilderExtMacOS};
+        let mut builder = EventLoop::with_user_event();
+        builder
+            .with_activation_policy(ActivationPolicy::Regular)
+            .with_default_menu(true)
+            .with_activate_ignoring_other_apps(true);
+        builder.build().unwrap()
+    };
+    #[cfg(not(target_os = "macos"))]
     let event_loop: EventLoop<Option<DeviceProperties>> =
         EventLoop::with_user_event().build().unwrap();
     let proxy: EventLoopProxy<Option<DeviceProperties>> = event_loop.create_proxy();
@@ -51,6 +79,15 @@ fn main() {
 
         use hyper_headset::devices::connect_compatible_device;
 
+        // LaunchServices historically passed `-psn_…` to bundled apps.
+        #[cfg(target_os = "macos")]
+        let args = std::env::args().filter(|arg| !arg.starts_with("-psn_"));
+        #[cfg(not(target_os = "macos"))]
+        let args = std::env::args();
+
+        // Battery is read on every tick. A full property sweep still happens every 30 ticks.
+        const DEFAULT_REFRESH_SECS: &str = if cfg!(target_os = "macos") { "5" } else { "3" };
+
         let matches = Command::new(env!("CARGO_PKG_NAME"))
         .version(env!("CARGO_PKG_VERSION"))
         .disable_version_flag(false)
@@ -62,7 +99,7 @@ fn main() {
                 .alias("refresh_interval")
                 .required(false)
                 .help("Set the refresh interval (in seconds)")
-                .default_value("3")
+                .default_value(DEFAULT_REFRESH_SECS)
                 .value_parser(clap::value_parser!(u64)),
         )
         .arg(
@@ -81,22 +118,14 @@ fn main() {
             .required(false)
             .help("Use verbose output ")
         )
-        .get_matches();
+        .get_matches_from(args);
 
         VERBOSE.set(matches.get_flag("verbose")).unwrap();
 
         let press_mute_key = *matches.get_one::<bool>("press-mute-key").unwrap_or(&true);
-        let mut enigo = if press_mute_key {
-            match Enigo::new(&Settings::default()) {
-                Ok(enigo) => Some(enigo),
-                Err(e) => {
-                    eprintln!("Virtual mute key failed to initialize: {e}");
-                    None
-                }
-            }
-        } else {
-            None
-        };
+        // Built on the first mute change. Creating it at launch asks macOS for
+        // Accessibility ("control") before the headset has been used.
+        let mut enigo: Option<Enigo> = None;
         let refresh_interval = *matches.get_one::<u64>("refresh-interval").unwrap_or(&3);
         let refresh_interval = Duration::from_secs(refresh_interval);
 
@@ -125,6 +154,10 @@ fn main() {
             #[cfg(not(feature = "eq-support"))]
             warn_eq_unavailable_once(device.device_properties().can_set_equalizer);
 
+            // Show battery before the slower full property sweep.
+            let _ = device.passive_refresh_state();
+            let _ = proxy.send_event(Some(device.device_properties()));
+
             // Run tick loop while connected
             let mut run_counter = 0;
             loop {
@@ -134,15 +167,28 @@ fn main() {
                 } else {
                     device.passive_refresh_state()
                 } {
-                    Ok(()) => (),
+                    Ok(()) => {
+                        // Publish before the poll wait, or the menu bar stays empty
+                        // for the whole refresh interval.
+                        let _ = proxy.send_event(Some(device.device_properties()));
+                    }
                     Err(error) => {
                         eprintln!("{error}");
                         let _ = proxy.send_event(Some(device.device_properties()));
                         break; // exit tick loop to retry connection in the outer loop
                     }
                 };
-                if mute_state.is_some() && mute_state != device.device_properties().muted {
-                    if let Some(enigo) = &mut enigo {
+                if mute_state.is_some() && mute_state != device.device_properties().muted && press_mute_key
+                {
+                    if enigo.is_none() {
+                        match Enigo::new(&Settings::default()) {
+                            Ok(instance) => enigo = Some(instance),
+                            Err(e) => {
+                                eprintln!("Virtual mute key failed to initialize: {e}");
+                            }
+                        }
+                    }
+                    if let Some(enigo) = enigo.as_mut() {
                         if let Err(e) = enigo.key(Key::F20, Direction::Click) {
                             eprintln!("Failed to press key on mute: {e}");
                         }
