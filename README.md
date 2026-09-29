@@ -2,11 +2,23 @@
 
 [![AUR Git Version](https://img.shields.io/aur/version/hyper-headset-git)](https://aur.archlinux.org/packages/hyper-headset-git)
 [![AUR Bin Version](https://img.shields.io/aur/version/hyper-headset-bin)](https://aur.archlinux.org/packages/hyper-headset-bin)
-[![GitHub Release](https://img.shields.io/github/v/release/LennardKittner/HyperHeadset)](https://github.com/LennardKittner/HyperHeadset/releases)
-[![GitHub Downloads](https://img.shields.io/github/downloads/LennardKittner/HyperHeadset/total.svg?label=GitHub%20Downloads)](https://github.com/LennardKittner/HyperHeadset/releases)
+[![GitHub Release](https://img.shields.io/github/v/release/farhansh911/HyperHeadset)](https://github.com/farhansh911/HyperHeadset/releases)
+[![GitHub Downloads](https://img.shields.io/github/downloads/farhansh911/HyperHeadset/total.svg?label=GitHub%20Downloads)](https://github.com/farhansh911/HyperHeadset/releases)
 [![Sponsor](https://img.shields.io/badge/-Sponsor-green?style=flat&logo=github)](https://github.com/sponsors/LennardKittner)
 
 A CLI and tray application for monitoring and managing HyperX headsets.
+
+## Download the Mac app
+
+The Apple Silicon app is the zip on the [macOS release](https://github.com/farhansh911/HyperHeadset/releases/tag/v1.10.1-macos), not a file in the source list.
+
+[Download HyperHeadset-1.10.1-macOS-arm64.zip](https://github.com/farhansh911/HyperHeadset/releases/download/v1.10.1-macos/HyperHeadset-1.10.1-macOS-arm64.zip)
+
+1. Unzip it and move `HyperHeadset.app` to Applications.
+2. Open the app. If macOS says the developer cannot be verified, go to System Settings → Privacy & Security and choose Open Anyway.
+3. Allow the app to use the headset when macOS asks.
+
+This build is for Apple Silicon Macs.
 
 |     OS      |                       Tooltip                        |                      Context Menu                      |
 | :---------: | :--------------------------------------------------: | :----------------------------------------------------: |
@@ -54,7 +66,9 @@ yay -S hyper-headset-bin
 
 ### Prebuilt Binary (Linux/MacOS/Windows)
 
-Download from [GitHub releases](https://github.com/LennardKittner/HyperHeadset/releases). Or install it via [crates.io](https://crates.io/crates/hyper_headset) `cargo install hyper_headset`.
+On Apple Silicon, download [HyperHeadset-1.10.1-macOS-arm64.zip](https://github.com/farhansh911/HyperHeadset/releases/download/v1.10.1-macos/HyperHeadset-1.10.1-macOS-arm64.zip) from the [macOS release](https://github.com/farhansh911/HyperHeadset/releases/tag/v1.10.1-macos).
+
+Linux and Windows builds are on the [original project releases](https://github.com/LennardKittner/HyperHeadset/releases). Or install it via [crates.io](https://crates.io/crates/hyper_headset) `cargo install hyper_headset`.
 
 ⚠️**Linux Only**: The required udev rules will be installed automatically when the program is launched if they are missing.
 You will be prompted to allow the installation.
